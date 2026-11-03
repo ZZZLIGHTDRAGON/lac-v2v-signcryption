@@ -1,0 +1,1 @@
+{"version":"0.2.0","configurations":[{"name":"演示 V2V 会话","type":"debugpy","request":"launch","program":"${workspaceFolder}/demo.py","cwd":"${workspaceFolder}","console":"integratedTerminal"}]}

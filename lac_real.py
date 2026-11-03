@@ -1,75 +1,48 @@
-import ctypes
-import os
+"""ctypes interface for the accompanying LAC reference build (Linux)."""
+import ctypes as C
+from pathlib import Path
+from hmac import compare_digest
 
-# ====================== 加载 LAC 官方动态库 ======================
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-LIB_PATH = os.path.join(PROJECT_ROOT, "liblac.so")
-lib = ctypes.CDLL(LIB_PATH)
+lib = C.CDLL(str(Path(__file__).resolve().with_name("liblac_v2v.so")))
+U = C.c_ubyte
+P = C.POINTER(U)
+L = C.c_ulonglong
+lib.v2v_lac_size.argtypes = [C.c_int]
+lib.v2v_lac_size.restype = C.c_int
+PK, SK, CT, SS = (lib.v2v_lac_size(i) for i in range(4))
+if (PK, SK, CT, SS) != (544, 1056, 1024, 32):
+    raise ImportError("unexpected LAC build")
+for name, args in {
+    "crypto_kem_keypair":[P,P], "crypto_kem_enc":[P,P,P],
+    "crypto_kem_dec":[P,P,P], "crypto_encrypt_keypair":[P,P],
+    "crypto_encrypt":[P,C.POINTER(L),P,L,P],
+    "crypto_encrypt_open":[P,C.POINTER(L),P,L,P],
+}.items():
+    f=getattr(lib,name); f.argtypes=args; f.restype=C.c_int
 
-# ====================== LAC 官方标准参数 ======================
-CRYPTO_PUBLICKEYBYTES = 896
-CRYPTO_SECRETKEYBYTES = 1792
-CRYPTO_CIPHERTEXTBYTES = 1024
-CRYPTO_BYTES = 32
-
-# ====================== 1. PKE 接口（严格匹配官方签名）======================
-# crypto_encrypt_keypair: 生成密钥对
-lib.crypto_encrypt_keypair.restype = ctypes.c_int
-lib.crypto_encrypt_keypair.argtypes = [
-    ctypes.POINTER(ctypes.c_ubyte),  # pk: 公钥
-    ctypes.POINTER(ctypes.c_ubyte)   # sk: 私钥
-]
-
-# crypto_encrypt: 加密（官方真实参数顺序）
-lib.crypto_encrypt.restype = ctypes.c_int
-lib.crypto_encrypt.argtypes = [
-    ctypes.POINTER(ctypes.c_ubyte),        # c: 输出密文
-    ctypes.POINTER(ctypes.c_ulonglong),    # clen: 输出密文长度指针
-    ctypes.POINTER(ctypes.c_ubyte),        # m: 输入明文
-    ctypes.c_ulonglong,                    # mlen: 明文长度
-    ctypes.POINTER(ctypes.c_ubyte)         # pk: 公钥
-]
-
-# crypto_encrypt_open: 解密（官方真实参数顺序）
-lib.crypto_encrypt_open.restype = ctypes.c_int
-lib.crypto_encrypt_open.argtypes = [
-    ctypes.POINTER(ctypes.c_ubyte),        # m: 输出明文
-    ctypes.POINTER(ctypes.c_ulonglong),    # mlen: 输出明文长度指针
-    ctypes.POINTER(ctypes.c_ubyte),        # c: 输入密文
-    ctypes.c_ulonglong,                    # clen: 密文长度
-    ctypes.POINTER(ctypes.c_ubyte)         # sk: 私钥
-]
-
-# ====================== 2. KEM 接口（严格匹配官方签名）======================
-# crypto_kem_keypair: 生成密钥对
-lib.crypto_kem_keypair.restype = ctypes.c_int
-lib.crypto_kem_keypair.argtypes = [
-    ctypes.POINTER(ctypes.c_ubyte),  # pk: 公钥
-    ctypes.POINTER(ctypes.c_ubyte)   # sk: 私钥
-]
-
-# crypto_kem_enc: 封装
-lib.crypto_kem_enc.restype = ctypes.c_int
-lib.crypto_kem_enc.argtypes = [
-    ctypes.POINTER(ctypes.c_ubyte),  # c: 输出密文
-    ctypes.POINTER(ctypes.c_ubyte),  # ss: 输出共享密钥
-    ctypes.POINTER(ctypes.c_ubyte)   # pk: 公钥
-]
-
-# crypto_kem_dec: 解封装
-lib.crypto_kem_dec.restype = ctypes.c_int
-lib.crypto_kem_dec.argtypes = [
-    ctypes.POINTER(ctypes.c_ubyte),  # ss: 输出共享密钥
-    ctypes.POINTER(ctypes.c_ubyte),  # c: 输入密文
-    ctypes.POINTER(ctypes.c_ubyte)   # sk: 私钥
-]
-
-# ====================== 工具函数 ======================
-def bytes_to_ubyte_ptr(b: bytes):
-    """将 Python bytes 转换为 C 风格 unsigned char 指针"""
-    arr = (ctypes.c_ubyte * len(b)).from_buffer_copy(b)
-    return arr
-
-def ubyte_ptr_to_bytes(ptr, length: int) -> bytes:
-    """将 C 风格 unsigned char 指针转换为 Python bytes"""
-    return bytes(ptr[:length])
+def buf(n): return (U*n)()
+def arg(x,n):
+    if not isinstance(x,bytes) or len(x)!=n: raise ValueError("invalid LAC input length")
+    return (U*n).from_buffer_copy(x)
+def check(rc):
+    if rc: raise ValueError(f"LAC returned {rc}")
+def keypair(*,pke=False):
+    p,s=buf(PK),buf(SK)
+    check((lib.crypto_encrypt_keypair if pke else lib.crypto_kem_keypair)(p,s))
+    return bytes(p),bytes(s)
+def encap(pk):
+    c,k=buf(CT),buf(SS)
+    check(lib.crypto_kem_enc(c,k,arg(pk,PK)))
+    return bytes(c),bytes(k)
+def decap(sk,ct):
+    k=buf(SS);check(lib.crypto_kem_dec(k,arg(ct,CT),arg(sk,SK)))
+    return bytes(k)
+def encrypt(pk,message):
+    if not isinstance(message,bytes) or not 1<=len(message)<=SS: raise ValueError("PKE supports 1..32 bytes here")
+    c,n=buf(CT),L();check(lib.crypto_encrypt(c,C.byref(n),arg(message,len(message)),len(message),arg(pk,PK)))
+    if n.value!=CT: raise ValueError("invalid PKE output length")
+    return bytes(c)
+def decrypt(sk,ct):
+    m,n=buf(SS),L();check(lib.crypto_encrypt_open(m,C.byref(n),arg(ct,CT),CT,arg(sk,SK)))
+    if n.value>SS: raise ValueError("invalid PKE plaintext length")
+    return bytes(m[:n.value])

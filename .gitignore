@@ -1,15 +1,6 @@
-# virtual env
+*.so
+*.tar.gz
+vendor/
 .venv/
-venv/
-env/
-
-# python cache
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-
-# temp files
-*.log
-*.tmp
-.DS_Store
